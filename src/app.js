@@ -2,7 +2,8 @@ import express from "express";
 import { PrismaClient } from "@prisma/client";
 import multer from "multer";
 import multerS3 from "multer-s3";
-import { S3Client } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const app = express();
 const prisma = new PrismaClient();
@@ -21,7 +22,13 @@ const upload = multer({
   storage: multerS3({
     s3: s3,
     // bucket을 함수로 변경 - 동적으로 버킷 선택
-    bucket: process.env.AWS_PUBLIC_BUCKET_NAME,
+    bucket: (req, file, cb) => {
+      const isPrivate = req.query.access === "private";
+      const bucketName = isPrivate
+        ? process.env.AWS_PRIVATE_BUCKET_NAME
+        : process.env.AWS_PUBLIC_BUCKET_NAME;
+      cb(null, bucketName);
+    },
     key: (req, file, cb) => {
       // 버킷이 분리되어 있으므로 폴더 구분 불필요
       cb(null, `${Date.now()}_${file.originalname}`);
@@ -37,6 +44,7 @@ app
   })
   .post(upload.single("photo"), async (req, res) => {
     const { date, content } = req.body;
+    const isPrivate = req.query.access === "private";
     const { location, key } = req.file; // S3에 저장된 경로
 
     // DB 저장
@@ -48,7 +56,20 @@ app
       },
     });
 
-    return res.json(diaryEntry);
+    // private이면 presigned URL 생성
+    let presignedUrl = null;
+    if (isPrivate) {
+      const command = new GetObjectCommand({
+        Bucket: process.env.AWS_PRIVATE_BUCKET_NAME,
+        Key: key,
+      });
+      presignedUrl = await getSignedUrl(s3, command, { expiresIn: 60 * 5 }); // 5분
+    }
+
+    return res.json({
+      ...diaryEntry,
+      presignedUrl,
+    });
   });
 
 app.listen(3000, () => {
